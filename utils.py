@@ -27,13 +27,13 @@ def parse_args():
     parser.add_argument('--dataset', type=str, default='imdb', help='dataset name')
     # parser.add_argument('--device', type=int, default=1, help='Device cuda id')
     parser.add_argument('--device', default='cpu')
-    parser.add_argument('--seed', type=int, default=666, 
+    parser.add_argument('--seed', type=int, default=888, 
                         help='Random seed.')
     parser.add_argument('--metapath_num', type=int, default=2, 
                         help='numbers of metapath.')
     # model parameters
     parser.add_argument('--class_num', type=int, default=3)
-    parser.add_argument('--hops', type=int, default=3,
+    parser.add_argument('--hops', type=int, default=4,
                         help='Hop of neighbors to be calculated')
     parser.add_argument('--pe_dim', type=int, default=5,
                         help='position embedding size')
@@ -89,7 +89,7 @@ def parse_args():
 
 
 
-def re_features(adj, features, K):
+def re_features(adj, features, K): #[4780, 4780], [4780, 1232], 3
     nodes_features = torch.empty(features.shape[0], 1, K+1, features.shape[1])
     for i in range(features.shape[0]):
         nodes_features[i, 0, 0, :] = features[i] 
