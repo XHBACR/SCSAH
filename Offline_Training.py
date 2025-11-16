@@ -23,11 +23,6 @@ if __name__ == "__main__":
     # if torch.cuda.is_available():
     #     torch.cuda.manual_seed(args.seed)
 
-    # node_class = torch.load(f'./dataset/{args.dataset}/{args.dataset}_node_class.pt')  
-    
-    # home_adj = torch.load(f'./dataset/IMDB/imdb_con_adj.pt') 
-
-
     node_class = torch.load(f'./dataset/{args.dataset}/{args.dataset}_node_class.pt')   # [N,3]
     home_adj = torch.load(f'./dataset/{args.dataset}/{args.dataset}_con_adj.pt')       # [N,N] 稀疏
     adjs = torch.load(f'./dataset/{args.dataset}/{args.dataset}_adjs.pt')               # [M,N,N] 稀疏
@@ -42,33 +37,18 @@ if __name__ == "__main__":
         hops = args.hops
         M = adjs.shape[0]
 
-        # 节点类别
         node_labels = node_class.argmax(dim=1).tolist()
         all_nodes = set(range(num_nodes))
 
-        # ============================
-        #   构建 NetworkX 图
-        # ============================
-
-
-        # 元路径图列表
         G_mps = []
         for m in range(M):
             G_m = nx.from_numpy_array(adjs[m].to_dense().numpy())
             G_mps.append(G_m)
 
-        # ============================
-        #   预分配结果 Tensor
-        # ============================
-        # 全局 home_adj 采样结果：[N, 2, K]
         global_samples = torch.zeros((num_nodes, 2, sample_num), dtype=torch.long)
 
-        # 元路径采样结果：[N, M, 2, K]
         mp_samples = torch.zeros((num_nodes, M, 2, sample_num), dtype=torch.long)
 
-        # ============================
-        #      定义采样函数
-        # ============================
         def sample_for_graph(G, i, node_label):
             neighbors = set(G.neighbors(i))
 
@@ -93,27 +73,20 @@ if __name__ == "__main__":
 
             return pos_samples, neg_samples
 
-        # ============================
-        #     主循环：对每个节点采样
-        # ============================
+
         for i in tqdm(range(num_nodes), desc="Sampling on all graphs"):
 
             node_label = node_labels[i]
 
-            # ======= 全局图采样 =======
             pos_g, neg_g = sample_for_graph(G_global, i, node_label)
             global_samples[i, 0] = torch.tensor(pos_g)
             global_samples[i, 1] = torch.tensor(neg_g)
 
-            # ======= 元路径采样 =======
             for m in range(M):
                 pos_m, neg_m = sample_for_graph(G_mps[m], i, node_label)
                 mp_samples[i, m, 0] = torch.tensor(pos_m)
                 mp_samples[i, m, 1] = torch.tensor(neg_m)
 
-        # ============================
-        #       保存结果
-        # ============================
         torch.save({
             "global_samples": global_samples,
             "mp_samples": mp_samples

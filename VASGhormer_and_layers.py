@@ -266,41 +266,36 @@ class VASGhormer(nn.Module):
         low_level_emb = torch.stack(low_level_emb, dim=1) 
         high_level_emb = torch.stack(high_level_emb, dim=1) 
 
-        cos = torch.nn.CosineSimilarity(dim=-1)
+
         # ============================
         #      Semantic Contrastive Loss
         # ============================
-        sem_losses = []
+        # h_loc = low_level_emb      # [N, M, D]
+        # h_glo = high_level_emb     # [N, M, D]
 
-        # low_level_emb:  [N, M, D]
-        # high_level_emb: [N, M, D]
-        # mp_samples:     [N, M, 2, K]
+        pos_ids = mp_samples[:, :, 0]   # [N, M, K]
+        neg_ids = mp_samples[:, :, 1]   # [N, M, K]
 
-        for v in range(low_level_emb.size(0)):   # for each node
-            for p in range(metapath_num):        # for each meta-path
+        N, M, D = high_level_emb.shape
+        K = pos_ids.shape[-1]
 
-                h_loc = low_level_emb[v, p]      # [D]
-                h_glo = high_level_emb[v, p]     # [D]
+        expanded_emb = high_level_emb.unsqueeze(2).expand(-1, -1, K, -1)
+        pos_index = pos_ids.unsqueeze(-1).expand(-1, -1, -1, D)
+        pos_emb = torch.gather(expanded_emb, 0, pos_index)   # [N, M, K, D]
 
-                pos_ids = mp_samples[v, p, 0].to(args.device)   # [K]
-                neg_ids = mp_samples[v, p, 1].to(args.device)   # [K]
+        neg_index = neg_ids.unsqueeze(-1).expand(-1, -1, -1, D)
+        neg_emb = torch.gather(expanded_emb, 0, neg_index)   # [N, M, K, D]
 
-                # prototypes = mean of sampled embeddings
-                pos_proto = high_level_emb[pos_ids, p].mean(dim=0)   # [D]
-                neg_proto = high_level_emb[neg_ids, p].mean(dim=0)   # [D]
+        pos_proto = pos_emb.mean(dim=2)     # [N, M, D]
+        neg_proto = neg_emb.mean(dim=2)     # [N, M, D]
 
-                # similarity terms
-                sim_glo_neg = torch.cosine_similarity(h_glo, neg_proto, dim=-1)
-                sim_glo_pos = torch.cosine_similarity(h_glo, pos_proto, dim=-1)
-                sim_loc_glo = torch.cosine_similarity(h_loc, h_glo, dim=-1)
+        sim_glo_pos = F.cosine_similarity(high_level_emb, pos_proto, dim=-1)
+        sim_glo_neg = F.cosine_similarity(high_level_emb, neg_proto, dim=-1)
+        sim_loc_glo = F.cosine_similarity(low_level_emb, high_level_emb, dim=-1)
 
-                loss = torch.relu(sim_glo_neg - sim_glo_pos - sim_loc_glo + args.margin)
-                sem_losses.append(loss)
+        sem_con_loss = F.relu(sim_glo_neg - sim_glo_pos - sim_loc_glo + args.margin).mean()
 
-        # average over M meta-paths
-        sem_con_loss = torch.stack(sem_losses).mean()
-
-        
+                
         
         node_emb, community_emb = self.SemanticAttention(low_level_emb, high_level_emb) 
 
@@ -308,38 +303,27 @@ class VASGhormer(nn.Module):
         # ============================
         #       Unified Contrastive Loss
         # ============================
-        uni_losses = []
 
-        # node_emb:       [N, D] (local aggregated)
-        # community_emb:  [N, D] (global aggregated)
-        # global_samples: [N, 2, K]
-        for v in range(node_emb.size(0)):
+        pos_ids = global_samples[:, 0, :]   # [N, K]
+        neg_ids = global_samples[:, 1, :]   # [N, K]
 
-            h_loc = node_emb[v]          # [D]
-            h_glo = community_emb[v]     # [D]
+        pos_emb = community_emb[pos_ids]    # [N, K, D]
+        neg_emb = community_emb[neg_ids]    # [N, K, D]
 
-            pos_ids = global_samples[v, 0].to(args.device)  # [K]
-            neg_ids = global_samples[v, 1].to(args.device)  # [K]
+        # 原型
+        pos_proto = pos_emb.mean(dim=1)     # [N, D]
+        neg_proto = neg_emb.mean(dim=1)     # [N, D]
 
-            pos_proto = community_emb[pos_ids].mean(dim=0)  # [D]
-            neg_proto = community_emb[neg_ids].mean(dim=0)  # [D]
+        # cosine similarity
+        sim_glo_pos = F.cosine_similarity(community_emb, pos_proto)
+        sim_glo_neg = F.cosine_similarity(community_emb, neg_proto)
+        sim_loc_glo = F.cosine_similarity(node_emb, community_emb)
 
-            # sim_glo_neg = torch.sigmoid(torch.sum(h_glo * neg_proto, dim = -1))
-            # sim_glo_pos = torch.sigmoid(torch.sum(h_glo * pos_proto, dim = -1))
-            # sim_loc_glo = torch.sigmoid(torch.sum(h_loc * h_glo, dim = -1))
-            sim_glo_neg = torch.cosine_similarity(h_glo, neg_proto, dim=-1)
-            sim_glo_pos = torch.cosine_similarity(h_glo, pos_proto, dim=-1)
-            sim_loc_glo = torch.cosine_similarity(h_loc, h_glo, dim=-1)
-            
-
-            loss = torch.relu(sim_glo_neg - sim_glo_pos - sim_loc_glo + args.margin)
-            uni_losses.append(loss)
-
-        glo_con_loss = torch.stack(uni_losses).mean()
+        glo_con_loss = F.relu(sim_glo_neg - sim_glo_pos - sim_loc_glo + args.margin).mean()
 
 
-        # con_loss= 0.7*sem_con_loss + glo_con_loss
-        con_loss= glo_con_loss
+        con_loss= 0.7*sem_con_loss + glo_con_loss
+        # con_loss= glo_con_loss
         
         class_prediction = self.classification_layer(node_emb) 
         cls_loss=self.classificationloss(class_prediction, class_label)
