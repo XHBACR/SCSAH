@@ -1,8 +1,7 @@
-
 import time
 import utils
 import MvSF2Token
-import random
+import random as pyrandom  # 确保使用的是 Python 内置的 random 模块
 import argparse
 import numpy as np
 import torch
@@ -18,19 +17,115 @@ if __name__ == "__main__":
 
     args = parse_args()
     print(args)
-    random.seed(args.seed)
+    pyrandom.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     # if torch.cuda.is_available():
     #     torch.cuda.manual_seed(args.seed)
 
-    node_class = torch.load(f'./dataset/{args.dataset}/{args.dataset}_node_class.pt')  
-    query_node=torch.load(f'./dataset/{args.dataset}/query_node.pt') 
-    true_community = torch.load(f'./dataset/{args.dataset}/{args.dataset}_true_community_of_query.pt') 
-    home_adj = torch.load(f'./dataset/IMDB/imdb_con_adj.pt') 
-    G = nx.from_numpy_array(home_adj.to_dense().numpy())
-    test_query_node=query_node[:200]
-    test_true_community = true_community.to_dense()[:200]
+    # node_class = torch.load(f'./dataset/{args.dataset}/{args.dataset}_node_class.pt')  
+    
+    # home_adj = torch.load(f'./dataset/IMDB/imdb_con_adj.pt') 
+
+
+    node_class = torch.load(f'./dataset/{args.dataset}/{args.dataset}_node_class.pt')   # [N,3]
+    home_adj = torch.load(f'./dataset/{args.dataset}/{args.dataset}_con_adj.pt')       # [N,N] 稀疏
+    adjs = torch.load(f'./dataset/{args.dataset}/{args.dataset}_adjs.pt')               # [M,N,N] 稀疏
+    G_global = nx.from_numpy_array(home_adj.to_dense().numpy())
+
+    samples_path = f'./dataset/{args.dataset}/{args.dataset}_samples.pt'
+
+    if not os.path.exists(samples_path):
+
+        num_nodes = node_class.shape[0]
+        sample_num = args.sample_num
+        hops = args.hops
+        M = adjs.shape[0]
+
+        # 节点类别
+        node_labels = node_class.argmax(dim=1).tolist()
+        all_nodes = set(range(num_nodes))
+
+        # ============================
+        #   构建 NetworkX 图
+        # ============================
+
+
+        # 元路径图列表
+        G_mps = []
+        for m in range(M):
+            G_m = nx.from_numpy_array(adjs[m].to_dense().numpy())
+            G_mps.append(G_m)
+
+        # ============================
+        #   预分配结果 Tensor
+        # ============================
+        # 全局 home_adj 采样结果：[N, 2, K]
+        global_samples = torch.zeros((num_nodes, 2, sample_num), dtype=torch.long)
+
+        # 元路径采样结果：[N, M, 2, K]
+        mp_samples = torch.zeros((num_nodes, M, 2, sample_num), dtype=torch.long)
+
+        # ============================
+        #      定义采样函数
+        # ============================
+        def sample_for_graph(G, i, node_label):
+            neighbors = set(G.neighbors(i))
+
+            # ------- 正样本 -------
+            positive_candidates = [n for n in neighbors if node_labels[n] == node_label and n != i]
+
+            if len(positive_candidates) < sample_num:
+                pos_samples = pyrandom.choices(positive_candidates or [i], k=sample_num)
+            else:
+                pos_samples = pyrandom.sample(positive_candidates, sample_num)
+
+            # ------- 负样本 -------
+            hops_nodes = set(nx.single_source_shortest_path_length(G, i, cutoff=hops).keys())
+            negative_candidates = list((all_nodes - hops_nodes) | 
+                                    {n for n in all_nodes if node_labels[n] != node_label})
+            negative_candidates = [n for n in negative_candidates if n != i]
+
+            if len(negative_candidates) < sample_num:
+                neg_samples = pyrandom.choices(negative_candidates or [i], k=sample_num)
+            else:
+                neg_samples = pyrandom.sample(negative_candidates, sample_num)
+
+            return pos_samples, neg_samples
+
+        # ============================
+        #     主循环：对每个节点采样
+        # ============================
+        for i in tqdm(range(num_nodes), desc="Sampling on all graphs"):
+
+            node_label = node_labels[i]
+
+            # ======= 全局图采样 =======
+            pos_g, neg_g = sample_for_graph(G_global, i, node_label)
+            global_samples[i, 0] = torch.tensor(pos_g)
+            global_samples[i, 1] = torch.tensor(neg_g)
+
+            # ======= 元路径采样 =======
+            for m in range(M):
+                pos_m, neg_m = sample_for_graph(G_mps[m], i, node_label)
+                mp_samples[i, m, 0] = torch.tensor(pos_m)
+                mp_samples[i, m, 1] = torch.tensor(neg_m)
+
+        # ============================
+        #       保存结果
+        # ============================
+        torch.save({
+            "global_samples": global_samples,
+            "mp_samples": mp_samples
+        }, samples_path)
+
+    else:
+        data = torch.load(samples_path)
+        global_samples = data["global_samples"]
+        mp_samples = data["mp_samples"]
+
+
+
 
     MvSF_path = f'./dataset/{args.dataset}/{args.dataset}_MvSFs.pt'
     if not os.path.exists(MvSF_path):
@@ -44,11 +139,6 @@ if __name__ == "__main__":
     else:
         processed_features = torch.load(MvSF_path)
     
-    # adj_batch, minus_adj_batch = [], []
-    # for i in range(0,args.metapath_num):
-    #     adj_, minus_adj_ = transform_sp_csr_to_coo(transform_coo_to_csr(adjs[i]), args.batch_size, features.shape[1])
-    #     adj_batch.append(adj_)
-    #     minus_adj_batch.append(minus_adj_)
     
     data_loader = Data.DataLoader(processed_features, batch_size=args.batch_size, shuffle = False)
 
@@ -71,7 +161,10 @@ if __name__ == "__main__":
     best_f1 = 0.0  # Stores the highest F1 score
     no_improve_count = 0  # Tracks the number of epochs without improvement
     best_model_path = f'{args.save_path}/{args.model_name}_best.pth'  # Path to save the best model
-
+    query_node=torch.load(f'./dataset/{args.dataset}/query_node.pt') 
+    true_community = torch.load(f'./dataset/{args.dataset}/{args.dataset}_true_community_of_query.pt')
+    test_query_node=query_node[:200]
+    test_true_community = true_community.to_dense()[:200]
     for epoch in range(args.epochs):
         model.train()
         epoch_loss = 0
@@ -79,11 +172,10 @@ if __name__ == "__main__":
         all_class_prediction = []
         for index, item in enumerate(data_loader):
             nodes_features = item.to(args.device)
-            adj_set, minus_adj_set = [], []
 
             optimizer.zero_grad()
             community_emb, class_prediction, loss_train = model.trainModel(
-                nodes_features, adj_set, minus_adj_set, args.metapath_num, node_class
+                nodes_features, args.metapath_num, node_class, global_samples, mp_samples, args
             )
             epoch_loss += loss_train.item()
             loss_train.backward()
@@ -97,7 +189,7 @@ if __name__ == "__main__":
         # Evaluate the model
         model.eval()
         result_f1 = epoch_evaluate(
-            all_community_emb, all_class_prediction, test_query_node, test_true_community, G, args
+            all_community_emb, all_class_prediction, test_query_node, test_true_community, G_global, args
         )
         print(
             'Epoch: {:03d}  '.format(epoch + 1),
@@ -123,6 +215,6 @@ if __name__ == "__main__":
 
 
     print("Finish offline training process!")
-    
+
 
 

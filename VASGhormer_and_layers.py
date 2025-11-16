@@ -248,8 +248,8 @@ class VASGhormer(nn.Module):
         self.classificationloss = nn.CrossEntropyLoss()
 
     #Offline Training
-    def trainModel(self, x , adj_, minus_adj , metapath_num, class_label): 
-        shuf_index = torch.randperm(x.shape[0])
+    def trainModel(self, x , metapath_num, class_label, global_samples, mp_samples,args): 
+
         sem_con_loss = 0.0
         glo_con_loss = 0.0
         cls_loss = 0.0
@@ -261,32 +261,85 @@ class VASGhormer(nn.Module):
             neighbor_tensor = self.readout(neighbor_tensor, torch.tensor([0]).to(self.config.device)) 
             node_tensor=node_tensor.squeeze() 
             neighbor_tensor=neighbor_tensor.squeeze() 
-            node_tensor_shuf = node_tensor[shuf_index] 
-            neighbor_tensor_shuf = neighbor_tensor[shuf_index] 
-            logits_aa = torch.sigmoid(torch.sum(node_tensor * neighbor_tensor, dim = -1)) 
-            logits_bb = torch.sigmoid(torch.sum(node_tensor_shuf * neighbor_tensor_shuf, dim = -1))
-            logits_ab = torch.sigmoid(torch.sum(node_tensor * neighbor_tensor_shuf, dim = -1))
-            logits_ba = torch.sigmoid(torch.sum(node_tensor_shuf * neighbor_tensor, dim = -1))
-            # ones = torch.ones(logits_aa.size(0)).cuda(logits_aa.device)
-            ones = torch.ones(logits_aa.size(0)).cpu() 
-            sem_con_loss += self.marginloss(logits_aa, logits_ba, ones) 
-            sem_con_loss += self.marginloss(logits_bb, logits_ab, ones)
             low_level_emb.append(node_tensor)
             high_level_emb.append(neighbor_tensor)
         low_level_emb = torch.stack(low_level_emb, dim=1) 
         high_level_emb = torch.stack(high_level_emb, dim=1) 
+
+        cos = torch.nn.CosineSimilarity(dim=-1)
+        # ============================
+        #      Semantic Contrastive Loss
+        # ============================
+        sem_losses = []
+
+        # low_level_emb:  [N, M, D]
+        # high_level_emb: [N, M, D]
+        # mp_samples:     [N, M, 2, K]
+
+        for v in range(low_level_emb.size(0)):   # for each node
+            for p in range(metapath_num):        # for each meta-path
+
+                h_loc = low_level_emb[v, p]      # [D]
+                h_glo = high_level_emb[v, p]     # [D]
+
+                pos_ids = mp_samples[v, p, 0].to(args.device)   # [K]
+                neg_ids = mp_samples[v, p, 1].to(args.device)   # [K]
+
+                # prototypes = mean of sampled embeddings
+                pos_proto = high_level_emb[pos_ids, p].mean(dim=0)   # [D]
+                neg_proto = high_level_emb[neg_ids, p].mean(dim=0)   # [D]
+
+                # similarity terms
+                sim_glo_neg = torch.cosine_similarity(h_glo, neg_proto, dim=-1)
+                sim_glo_pos = torch.cosine_similarity(h_glo, pos_proto, dim=-1)
+                sim_loc_glo = torch.cosine_similarity(h_loc, h_glo, dim=-1)
+
+                loss = torch.relu(sim_glo_neg - sim_glo_pos - sim_loc_glo + args.margin)
+                sem_losses.append(loss)
+
+        # average over M meta-paths
+        sem_con_loss = torch.stack(sem_losses).mean()
+
+        
+        
         node_emb, community_emb = self.SemanticAttention(low_level_emb, high_level_emb) 
-        node_tensor_shuf = node_emb[shuf_index]  
-        neighbor_tensor_shuf = community_emb[shuf_index] 
-        logits_aa = torch.sigmoid(torch.sum(node_emb * community_emb, dim = -1)) 
-        logits_bb = torch.sigmoid(torch.sum(node_tensor_shuf * neighbor_tensor_shuf, dim = -1))
-        logits_ab = torch.sigmoid(torch.sum(node_emb * neighbor_tensor_shuf, dim = -1))
-        logits_ba = torch.sigmoid(torch.sum(node_tensor_shuf * community_emb, dim = -1))
-        # ones = torch.ones(logits_aa.size(0)).cuda(logits_aa.device)
-        ones = torch.ones(logits_aa.size(0)).cpu() 
-        glo_con_loss += self.marginloss(logits_aa, logits_ba, ones) 
-        glo_con_loss += self.marginloss(logits_bb, logits_ab, ones)
-        con_loss= 0.7*sem_con_loss + glo_con_loss
+
+
+        # ============================
+        #       Unified Contrastive Loss
+        # ============================
+        uni_losses = []
+
+        # node_emb:       [N, D] (local aggregated)
+        # community_emb:  [N, D] (global aggregated)
+        # global_samples: [N, 2, K]
+        for v in range(node_emb.size(0)):
+
+            h_loc = node_emb[v]          # [D]
+            h_glo = community_emb[v]     # [D]
+
+            pos_ids = global_samples[v, 0].to(args.device)  # [K]
+            neg_ids = global_samples[v, 1].to(args.device)  # [K]
+
+            pos_proto = community_emb[pos_ids].mean(dim=0)  # [D]
+            neg_proto = community_emb[neg_ids].mean(dim=0)  # [D]
+
+            # sim_glo_neg = torch.sigmoid(torch.sum(h_glo * neg_proto, dim = -1))
+            # sim_glo_pos = torch.sigmoid(torch.sum(h_glo * pos_proto, dim = -1))
+            # sim_loc_glo = torch.sigmoid(torch.sum(h_loc * h_glo, dim = -1))
+            sim_glo_neg = torch.cosine_similarity(h_glo, neg_proto, dim=-1)
+            sim_glo_pos = torch.cosine_similarity(h_glo, pos_proto, dim=-1)
+            sim_loc_glo = torch.cosine_similarity(h_loc, h_glo, dim=-1)
+            
+
+            loss = torch.relu(sim_glo_neg - sim_glo_pos - sim_loc_glo + args.margin)
+            uni_losses.append(loss)
+
+        glo_con_loss = torch.stack(uni_losses).mean()
+
+
+        # con_loss= 0.7*sem_con_loss + glo_con_loss
+        con_loss= glo_con_loss
         
         class_prediction = self.classification_layer(node_emb) 
         cls_loss=self.classificationloss(class_prediction, class_label)

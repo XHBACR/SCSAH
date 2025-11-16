@@ -31,6 +31,7 @@ def parse_args():
                         help='Random seed.')
     parser.add_argument('--metapath_num', type=int, default=2, 
                         help='numbers of metapath.')
+    parser.add_argument('--sample_num', type=int, default=10, help='numbers of samples.')
     # model parameters
     parser.add_argument('--class_num', type=int, default=3)
     parser.add_argument('--hops', type=int, default=4,
@@ -50,6 +51,8 @@ def parse_args():
     parser.add_argument('--attention_dropout', type=float, default=0.1,
                         help='Dropout in the attention layer')
     parser.add_argument('--readout', type=str, default="mean")
+    parser.add_argument('--margin', type=float, default=1.5,
+                        help='margin')
     parser.add_argument('--alpha', type=float, default=0.1, 
                         help='the value the balance the loss.')
 
